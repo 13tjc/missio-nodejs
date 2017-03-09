@@ -1,0 +1,478 @@
+var moment = require('moment');
+var momentTimezone = require('moment-timezone');
+var request = require('superagent');
+var cheerio = require('cheerio');
+var debug = require('debug')('Missio:utils:inputMask');
+var util = require('util');
+var NetSuite = require('./netsuite');
+var memcached = require('../config/memcached');
+
+var sharp = require('sharp');
+var fs = require('fs');
+var path = require('path');
+var async = require('async');
+
+var Project = require('../models/project');
+var ProjectCompanion = require('../models/projectCompanion');
+var Organization = require('../models/organization');
+var Diocese = require('../models/diocese');
+var OrgFollow = require('../models/organizationFollow');
+
+var pushNotify = require('../utils/pushNotify');
+
+var noop = function () {};
+
+var serverHostName = 'missio.org';
+
+module.exports = {
+  getProjects: getProjects,
+  getOrganizations: getOrganizations,
+  getDioceses: getDioceses
+}
+
+function getDioceses (res) {
+  var req = request.get('http://api.missioapp.org/portal/v1/dioceses/')
+    .query({ auth_token: '4b393c61-f9ec-4c5f-9133-0ff01fb86a93'})
+    .end(function (err, response) {
+      if (err) return;
+      var dioceses = util.isArray(response.body) ? response.body : [response.body];
+      res && res.write('data: {"length": ' + dioceses.length + '}' + '\n\n')
+      for (var i = 0; i < dioceses.length; i++) {
+        addDiocese(dioceses[i], res);
+      };
+
+    });
+}
+
+function getOrganizations (id, res) {
+  var req = request.get('http://api.missioapp.org/portal/v1/parishes/' + (id ? id : ''))
+    .query({ auth_token: '4b393c61-f9ec-4c5f-9133-0ff01fb86a93'})
+    .end(function (err, response) {
+      if (err) return;
+      var organizations = util.isArray(response.body) ? response.body : [response.body];
+      res && res.write('data: {"length": ' + organizations.length + '}' + '\n\n')
+      for (var i = 0; i < organizations.length; i++) {
+        addOrganization(organizations[i], res);
+      };
+
+    });
+}
+
+// function getProjects (req) {
+//   //serverHostName = req.headers.host;
+
+//   // if object exists in memcache then projects have been pulled in the past 10 minutes
+//   //console.log("A______")
+//   memcached.get('missio-get-projects', function (err, data) {
+//     console.log("B______")
+//     //if (data) return;
+//     //console.log("C______")
+//     request.get('http://api.missioapp.org/portal/v1/projects/')
+//       .query({ auth_token: '4b393c61-f9ec-4c5f-9133-0ff01fb86a93'})
+//       .end(function (err, response) {
+//       // console.log("D______")
+
+
+//         Project.findAll({
+//           attributes: ['id', 'updated_date']
+//         }).then(function (projects) {
+//         //  console.log("E______")
+
+//           compareProjects(response.body, projects);
+//           //console.log("F______")
+//           // use memcache to make sure projects pull occurs once per 30 minutes
+//            memcached.set('missio-get-projects', response.body, 1800, noop);
+//         })
+//       });
+
+//   });
+
+  
+// }
+
+function getProjects (req) {
+ // serverHostName = req.headers.host;
+
+  // if object exists in memcache then projects have been pulled in the past 10 minutes
+  memcached.get('missio-get-projects', function (err, data) {
+    if (data) return;
+
+    request.get('http://api.missioapp.org/portal/v1/projects/')
+      .query({ auth_token: '4b393c61-f9ec-4c5f-9133-0ff01fb86a93'})
+      .end(function (err, response) {
+        Project.findAll({
+          attributes: ['id', 'updated_date']
+        }).then(function (projects) {
+          compareProjects(response.body, projects);
+
+          // use memcache to make sure projects pull occurs once per 30 minutes
+          // memcached.set('missio-get-projects', true, 1800, noop);
+        })
+      });
+
+  });
+
+  
+}
+
+
+function compareProjects (remoteProjects, localProjects) {
+  //console.log('Start comparing Projects')
+  var localProjectJson = {};
+  for (var i = 0; i < localProjects.length; i++) {
+    localProjectJson[localProjects[i].id] = localProjects[i].updated_date
+  };
+  for (var i = 0; i < remoteProjects.length; i++) {
+    var remoteProject = remoteProjects[i]
+    //console.log("-----IMGURL-----")
+    //console.log(remoteProject)
+    //console.log("----------")
+    if (!localProjectJson[remoteProject.project_no]) {
+      //console.log("ADDING_PROJECT")
+      addProject(remoteProject.project_no);
+    } else {
+      var remoteTimestamp = moment.tz(remoteProject.updated_date, 'America/New_York')
+      var localTimestamp = moment.utc(localProjectJson[remoteProject.project_no])
+      if (remoteTimestamp > localTimestamp || 1 == 1){
+      //console.log("UPDATE_PROJECT")
+        updateProject(remoteProject.project_no)
+      } 
+    }
+  }
+  //console.log('Finish comparing Projects')
+}
+
+function updateProject (projectId) {
+  debug('Updating project: ' + projectId)
+  request.get('http://api.missioapp.org/portal/v1/projects/' + projectId)
+    .query({ auth_token: '4b393c61-f9ec-4c5f-9133-0ff01fb86a93'})
+    .end(function (err, response) {
+      var project = response.body
+      Project.unscoped().findById(projectId).then(function (localProject) {
+        if (!localProject) return debug('Project ' + projectId + ' not found in DB');
+
+        var projectImages = project['project_images_url'] || [];
+        //async.map(projectImages, downloadAndResizeImage, function (err, projectImages) { // THOMAS RADEMAKER
+          
+          project.nsId = localProject.nsId;
+          NetSuite.updateProject(project, function (ns_resp) {
+          //  if (!ns_resp.success) return debug(ns_resp);
+            //console.log("UPDATE_PROJECT")
+            localProject.update({
+              id: project['project_no'],
+              whoimpacted: project['whoimpacted'] ? project['whoimpacted'].trim() : '',
+              howmanybenefit: project['howmanybenefit'],
+              institution_latitude: project['institution_latitude'],
+              institution_longtitude: project['institution_longtitude'],
+              project_latitude: project['project_latitude'],
+              project_longtitude: project['project_longtitude'],
+              facebook_link: project['facebook_link'] ? project['facebook_link'].trim() : '',
+              twitter_link: project['twitter_link'] ? project['twitter_link'].trim() : '',
+              project_start_date: moment.tz(project['published_date'], 'America/New_York').add(1, 'days').startOf('day'),
+              project_end_date: moment.tz(project['published_date'], 'America/New_York').add(31, 'days').startOf('day'),
+              project_cost: project['project_cost'],
+              category_no: project['category_no'],
+              subcategory_no: project['subcategory_no'],
+              category_other: project['category_other'] ? project['category_other'].trim() : '',
+              subcategory_other: project['subcategory_other'] ? project['subcategory_other'].trim() : '',
+              type_no: project['type_no'],
+              subtype_no: project['subtype_no'],
+              type_other: project['type_other'] ? project['type_other'].trim() : '',
+              subtype_other: project['subtype_other'] ? project['subtype_other'].trim() : '',
+              uploaded_date: moment.tz(project['uploaded_date'], 'America/New_York'),
+              published_date: moment.tz(project['published_date'], 'America/New_York'),
+              donations: project['donations'],
+              twin_relation: project['twin_relation'] === 'Yes' ? true : false,
+              twin_with: project['twin_with'],
+              twin_with_other: project['twin_with_other'],
+              twin_diocese_no: project['twin_diocese_no'],
+              twin_parish_no: project['twin_parish_no'],
+              project_images_url: projectImages,
+              project_no: project['project_no'],
+              project_name: project['project_name'] ? project['project_name'].trim() : '',
+              description: project['description'] ? project['description'].trim() : '',
+              institution_name: project['institution_name'] ? project['institution_name'].trim() : '',
+              address: project['address'] ? project['address'].trim() : '',
+              city: project['city'] ? project['city'].trim() : '',
+              state_province: project['state_province'] ? project['state_province'].trim() : '',
+              country: project['country'] ? project['country'].trim() : '',
+              country_code: project['country_code'] ? project['country_code'].trim() : '',
+              postal_code: project['postal_code'] ? project['postal_code'].trim() : '',
+              diocese_name: project['diocese_name'] ? project['diocese_name'].trim() : '',
+              project_leader: project['addedby_ref_no'] || 221,
+              project_leader_name: project['project_leader_name'] ? project['project_leader_name'].trim() : '',
+              added_date: moment.tz(project['added_date'], 'America/New_York'),
+              updated_date: moment.tz(project['updated_date'], 'America/New_York'),
+              status: project['status'] ? project['status'].trim() : '',
+              featured_image_url: projectImages[0],
+              added_date_text: project['added_date_text'],
+              pastoral_evangelizing_effort: project['pastoral_evangelizing_effort'],
+              challenge_info: project['challenge_info'] // THOMAS RADEMAKER : MISSIO_CHALLENGE
+            }).then(function (project) {
+              if (!project) return debug('Error updating project: ' + projectId);
+              var companionList = project['project_companions'] || [0]
+              for (var i = 0; i < companionList.length; i++) {
+                addProjectCompanion(project.id, companionList[i]);
+              };
+
+              var companionListIds = companionList.map(function (obj) {
+                return obj.user_ref_no;
+              });
+
+              removeMultipleProjectCompanions(project.id, companionListIds)
+
+              return debug('Updated project: ' + projectId);
+            })
+          })
+
+        //}); // THOMAS RADEMAKER
+
+      })
+
+    });
+}
+
+function addProject (projectId) {
+  //console.log('Adding project: ' + projectId)
+  request.get('http://api.missioapp.org/portal/v1/projects/' + projectId)
+    .query({ auth_token: '4b393c61-f9ec-4c5f-9133-0ff01fb86a93'})
+    .end(function (err, response) {
+    //  console.log("ADDING_PROJECT_REPONSE " + response.body)
+
+      var project = response.body;
+
+      var projectImages = project['project_images_url'] || [];
+      //async.map(projectImages, downloadAndResizeImage, function (err, projectImages) { // THOMAS RADEMAKER
+ //console.log("ADDING_NET_SUITE")
+        NetSuite.createProject(project, function (ns_resp) {
+          //if (!ns_resp.success) return debug(ns_resp.error);
+   //       console.log("ADDING_IN_SQL")
+          Project.create({
+            nsId: ns_resp.id,
+            id: project['project_no'],
+            whoimpacted: project['whoimpacted'] ? project['whoimpacted'].trim() : '',
+            howmanybenefit: project['howmanybenefit'],
+            institution_latitude: project['institution_latitude'],
+            institution_longtitude: project['institution_longtitude'],
+            project_latitude: project['project_latitude'],
+            project_longtitude: project['project_longtitude'],
+            facebook_link: project['facebook_link'] ? project['facebook_link'].trim() : '',
+            twitter_link: project['twitter_link'] ? project['twitter_link'].trim() : '',
+            project_start_date: moment.tz(project['published_date'], 'America/New_York').add(1, 'days').startOf('day'),
+            project_end_date: moment.tz(project['published_date'], 'America/New_York').add(31, 'days').startOf('day'),
+            project_cost: project['project_cost'],
+            category_no: project['category_no'],
+            subcategory_no: project['subcategory_no'],
+            category_other: project['category_other'] ? project['category_other'].trim() : '',
+            subcategory_other: project['subcategory_other'] ? project['subcategory_other'].trim() : '',
+            type_no: project['type_no'],
+            subtype_no: project['subtype_no'],
+            type_other: project['type_other'] ? project['type_other'].trim() : '',
+            subtype_other: project['subtype_other'] ? project['subtype_other'].trim() : '',
+            uploaded_date: moment.tz(project['uploaded_date'], 'America/New_York'),
+            published_date: moment.tz(project['published_date'], 'America/New_York'),
+            donations: project['donations'],
+            twin_relation: project['twin_relation'] === 'Yes' ? true : false,
+            twin_with: project['twin_with'],
+            twin_with_other: project['twin_with_other'],
+            twin_diocese_no: project['twin_diocese_no'],
+            twin_parish_no: project['twin_parish_no'],
+            project_images_url: projectImages,
+            project_no: project['project_no'],
+            project_name: project['project_name'] ? project['project_name'].trim() : '',
+            description: project['description'] ? project['description'].trim() : '',
+            institution_name: project['institution_name'] ? project['institution_name'].trim() : '',
+            address: project['address'] ? project['address'].trim() : '',
+            city: project['city'] ? project['city'].trim() : '',
+            state_province: project['state_province'] ? project['state_province'].trim() : '',
+            country: project['country'] ? project['country'].trim() : '',
+            country_code: project['country_code'] ? project['country_code'].trim() : '',
+            postal_code: project['postal_code'] ? project['postal_code'].trim() : '',
+            diocese_name: project['diocese_name'] ? project['diocese_name'].trim() : '',
+            project_leader: project['addedby_ref_no'] || 221,
+            project_leader_name: project['project_leader_name'] ? project['project_leader_name'].trim() : '',
+            added_date: moment.tz(project['added_date'], 'America/New_York'),
+            updated_date: moment.tz(project['updated_date'], 'America/New_York'),
+            status: project['status'] ? project['status'].trim() : '',
+            featured_image_url: projectImages[0],
+            added_date_text: project['added_date_text'],
+            pastoral_evangelizing_effort: project['pastoral_evangelizing_effort'],
+            challenge_info: project['challenge_info'] // THOMAS RADEMAKER : MISSIO_CHALLENGE
+          }).then(function (project) {
+            if (!project) return debug('Error adding project: ' + projectId);
+            var companionList = companionList || [0]
+            for (var i = 0; i < companionList.length; i++) {
+              addProjectCompanion(project.id, companionList[i]);
+            };
+
+            if (project.twin_parish_no) {
+
+              Organization.findById(project.twin_parish_no).then(function (org) {
+                if (!org) return
+
+                OrgFollow.findAll({
+                  where: {
+                    organizationId: org.id
+                  },
+                  attributes: ['userId']
+                }).then(function (followers) {
+                  var message = util.format('%s has associated with a new project: %s', org.name, project.project_name)
+
+                  followers = followers.map(function (obj) {
+                    return obj.userId
+                  })
+
+                  function iterator (userId, cb) {
+                    pushNotify.send(userId, {title: '', body: message, payload: { project: project.id }})
+                  }
+
+                  async.each(followers, iterator)
+
+                })
+              })
+
+            }
+
+            return console.log('Added project: ' + projectId);
+          })
+
+        //}) // THOMAS RADEMAKER
+
+      })
+
+    });
+}
+
+function addProjectCompanion (projectId, user) {
+  var userId = user.user_ref_no;
+  Project.findById(projectId).then(function (project) {
+    if (!project) return;
+
+    project.addCompanion(userId).then(function () {
+
+    }).catch(function (err) {
+
+    })
+  });
+}
+
+function removeProjectCompanion (projectId, userId) {
+  Project.findById(projectId).then(function (project) {
+    if (!project) return;
+
+    project.removeCompanion(userId).then(function () {
+
+    }).catch(function (err) {
+
+    })
+  });
+}
+
+function removeMultipleProjectCompanions (projectId, userIds) {
+  ProjectCompanion.destroy({
+    where: {
+      projectId: projectId,
+      userId: {
+        notIn: userIds
+      }
+    }
+  }).then(function (count) {
+
+  })
+}
+
+function addDiocese (diocese, res) {
+  Diocese.upsert({
+    id: +diocese.diocese_no,
+    name: diocese.diocese_name.trim(),
+    country_code: diocese.country_code.trim()
+  }).then(function (created) {
+    debug('Added diocese: ' + diocese.diocese_no);
+    res && res.write('data: {"id": '+diocese.diocese_no+'}\n\n')
+  }).catch(function (err) {
+    debug('Error adding diocese: ' + diocese.diocese_no, err.message);
+    res && res.write('data: {"error": "'+err.message+'"}\n\n')
+  });
+
+}
+
+function addOrganization (organization, res) {
+  Organization.upsert({
+    id: +organization.parish_no,
+    type: 'parish',
+    name: organization.parish_name.trim(),
+    address1: organization.address1.trim(),
+    address2: organization.address2.trim(),
+    city: organization.city.trim(),
+    state: organization.state.trim(),
+    zip: organization.zipcode.trim(),
+    country_code: organization.country_code.trim(),
+    dioceseId: organization.diocese_info.diocese_no
+  }).then(function (created) {
+    debug('Added organization: ' + organization.parish_no);
+    res && res.write('data: {"id": '+organization.parish_no+'}\n\n')
+  }).catch(function (err) {
+    debug('Error adding organization: ' + organization.parish_no, err.message);
+    res && res.write('data: {"error": "'+err.message+'"}\n\n')
+  });
+
+}
+
+
+function testApp()
+{
+  downloadAndResizeImage("https://dab1nmslvvntp.cloudfront.net/wp-content/uploads/2015/07/1436439824nodejs-logo.png",function(err,urlPath)
+  {
+    console.log("done_image_loaded!!! >>>"+urlPath+"<<")
+  })
+}
+
+//setTimeout(testApp,2000);
+
+ 
+function downloadAndResizeImage (imgUrl, callback) {
+  console.log("IMAGE_URL :: >>"+imgUrl+"<<<");
+  //callback();
+  //return;
+  //callback(null,imgUrl);
+  //return;
+  //callback = callback || noop;
+  //var imgName = imgUrl.split("file=")[1];//imgUrl.split(".")[imgUrl.split(".").length - 2].split("/")[imgUrl.split(".")[imgUrl.split(".").length - 2].split("/").length - 1] + "." + imgUrl.split(".")[imgUrl.split(".").length - 1];//imgUrl.split(".")[imgUrl.split(".").length - 2].split("/")[imgUrl.split(".")[imgUrl.split(".").length - 2].split("/").length - 1];
+  var imgName = imgUrl.split("missiogallery/")[1];
+  //console.log("imgName " + imgName);
+  //;//imgUrl.match(/.*=(.*)$/i)[1];
+
+
+
+
+  var filePath = "/var/www/html/_media/" + imgName ;//path.join(path.relative(path.dirname(require.main.filename), path.join('./_media/' + imgName)));
+
+  //console.log("filePath >>>"+filePath+"<<<")
+
+  fs.stat(filePath, function (err, stat) {
+    if (stat)
+    {
+    //  console.log("NEW_URL :: " + 'http://' + path.join(serverHostName, 'media', imgName));
+      return callback(null, 'https://' + path.join(serverHostName, '_media', imgName))
+    };
+
+    var resize = sharp().rotate().resize(800, 800).max().on('error', function (err) {
+      fs.unlink(filePath);
+    });
+
+    var output = fs.createWriteStream(filePath).on('error', function (err) {
+      fs.unlink(filePath);
+    }).on('close', function () {
+      //console.log("NEW_URL_ :: " + 'http://' + path.join(serverHostName, 'media', imgName));
+      return callback(null, 'https://' + path.join(serverHostName, '_media', imgName));
+    });
+
+    var req = request.get(imgUrl).end(function (err, res) {
+      if (err) return fs.unlink(filePath);
+    });
+    
+    req.pipe(resize).pipe(output);
+
+  });
+
+}

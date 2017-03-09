@@ -1,0 +1,42 @@
+<div class="donation">
+  <h1 class="title">Donation Total</h1>
+  <p style="display:none;text-align:center;" class="alert_notmatch">An Error has occurred.</p>
+  <form action="">
+    <table class="result_list">
+      <tr>
+        <td class="item"><h3>Project Donation:</h3></td>
+        <td class="value"><h3>{{donation_amount_string}}</h3></td>
+      </tr>
+      <tr>
+        <td class="item"><h3>Missio General Fund:</h3></td>
+        <td class="value"><h3>{{generalFundAmount_string}}</h3></td>
+      </tr>
+      <tr>
+        <td class="item"><h3 style="display: inline;">Admin Fee:</h3><a href="#" class="info_q" data-animation="pop" data-content="By adding a contribution of 5% to cover administrative costs, you will ensure that 100% of your donation goes to your project."><img src="/web/images/q.png" alt=""/></a></td>
+        <td class="value"><h3>{{transactionFee_string}}</h3></td>
+      </tr>
+
+    </table>
+    <div class="result_tot">
+      <h3>You will be charged</h3>
+      <h1 class="total_result">{{total_amount_string}}</h1>
+      <div style="display:none;" class="spinner-loader">Loading…</div>
+      <div class="action_items">
+        <p class="gray">On {{cardTypeName}} *{{cardLastFour}} <a href="missio#edit-billing">(edit)</a></p>
+        <div class="check_group gray first">
+          <input name="anonymous" type="checkbox"/> <label for="">Please make my donation anonymous</label>
+        </div>
+        {{#if showGiftAid}}
+        <div class="check_group gray gift_aid">
+          <input name="giftAid" type="checkbox"/> <label for="">This donation is elligible ad "Gift Aid" lorem ipsum dolor sit amet consectuer.</label>
+        </div>
+        {{/if}}
+      </div>
+    </div>
+    <input type="hidden" name="projectId" value="{{projectId}}">
+    <input type="hidden" name="transactionId" value="{{transactionId}}">
+    <input class="submit" type="submit" value="Confirm"/><br/>
+    <a href="missio#edit-donation" class="edit_donation gray">Edit donation</a>
+
+  </form>
+</div>

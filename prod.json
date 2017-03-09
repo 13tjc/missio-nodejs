@@ -1,0 +1,16 @@
+{
+  "apps": [{
+    "name": "Missio API",
+    "script": "api.js",
+    "log_date_format": "YYYY-MM-DD HH:mm Z",
+    "min_uptime": "200s", // 200 seconds, defaults to 1000
+    "max_restarts": 10, // defaults to 15
+    "watch": false,
+    "ignore_watch": ["etc", "node_modules", "cometchat", "media"],
+    "autorestart": true, // enable/disable automatic restart when an app crashes or exits
+    "env": {
+      "NODE_ENV": "production",
+      "NEW_RELIC_LICENSE_KEY": "0d70ed1a74a537997d19c305c5477e1749b75e59"
+    }
+  }]
+}
