@@ -36,7 +36,7 @@
     "passport-google-token": "^0.1.1",
     "passport-local": "^1.0.0",
     "passport-twitter-token": "^1.1.1",
-    "sequelize": "3.5.1",
+    "sequelize": "5.21.3",
     "sharp": "0.11.0",
     "superagent": "^1.2.0",
     "xml2js": "^0.4.9"
